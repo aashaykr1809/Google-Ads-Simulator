@@ -51,11 +51,19 @@ import { cn } from './lib/utils';
 import { CampaignSettings, SimulationResult, TERMINOLOGY } from './types';
 import { runSimulation } from './simulationEngine';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'setup' | 'keyword-research' | 'simulation' | 'results' | 'import' | 'optimize' | 'learning'>('dashboard');
-  const [history, setHistory] = useState<SimulationResult[]>([]);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'setup' | 'keyword-research' | 'simulation' | 'results' | 'import' | 'optimize' | 'learning' | 'reporting'>('dashboard');
+  const [history, setHistory] = useState<SimulationResult[]>(() => {
+    try {
+      const saved = localStorage.getItem('adlab_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Failed to load history:", e);
+      return [];
+    }
+  });
   const [currentSettings, setCurrentSettings] = useState<CampaignSettings>({
     name: 'New Campaign',
     budget: 100,
@@ -86,9 +94,15 @@ export default function App() {
   const [testVariation, setTestVariation] = useState<CampaignSettings | null>(null);
   const [abTestResults, setAbTestResults] = useState<{ original: SimulationResult, variation: SimulationResult } | null>(null);
   const [isAbTesting, setIsAbTesting] = useState(false);
+  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [darkMode, setDarkMode] = useState(() => {
-    const saved = localStorage.getItem('adlab_dark_mode');
-    return saved ? JSON.parse(saved) : false;
+    try {
+      const saved = localStorage.getItem('adlab_dark_mode');
+      return saved ? JSON.parse(saved) : false;
+    } catch (e) {
+      console.error("Failed to load dark mode preference:", e);
+      return false;
+    }
   });
 
   useEffect(() => {
@@ -204,15 +218,15 @@ export default function App() {
     setIsSearchingKeywords(true);
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Act as Google Keyword Planner. Provide keyword ideas for the seed topic: "${keywordSeed}". 
+        model: "gemini-1.5-flash",
+        contents: [{ role: "user", parts: [{ text: `Act as Google Keyword Planner. Provide keyword ideas for the seed topic: "${keywordSeed}". 
         
         Return a JSON object with two arrays:
         1. "top": 10 keywords with the highest monthly search volume.
         2. "lowHanging": 10 keywords with low competition (difficulty < 40) and lower CPCs.
         
         For each keyword, provide an object with EXACTLY these keys: "text" (string), "volume" (number), "avgCpc" (number), and "difficulty" (number).
-        Return ONLY a JSON object with keys: top, lowHanging.`,
+        Return ONLY a JSON object with keys: top, lowHanging.` }] }],
         config: { 
           responseMimeType: "application/json",
           responseSchema: {
@@ -296,9 +310,7 @@ export default function App() {
 
   const generateAiInsights = async (result: SimulationResult) => {
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Analyze these Google Ads simulation results and provide structured actionable optimization tips.
+      const prompt = `Analyze these Google Ads simulation results and provide structured actionable optimization tips.
         Campaign: ${result.campaignSettings.name}
         Metrics: CTR: ${(result.metrics.ctr * 100).toFixed(2)}%, CPC: $${result.metrics.cpc.toFixed(2)}, Conversions: ${result.metrics.conversions}, ROAS: ${result.metrics.roas.toFixed(2)}.
         Budget: $${result.campaignSettings.budget}.
@@ -309,10 +321,16 @@ export default function App() {
           "tips": [
             { "title": "Tip Title", "problem": "What is lacking", "solution": "How to improve", "expectedResult": "Potential impact" }
           ]
-        }`,
+        }`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: { responseMimeType: "application/json" }
       });
-      setAiInsights(response.text || '');
+
+      const text = response.text || '';
+      setAiInsights(text);
     } catch (error) {
       console.error("AI Insights failed:", error);
       setAiInsights(JSON.stringify({
@@ -380,6 +398,7 @@ export default function App() {
           <NavButton active={activeTab === 'setup'} onClick={() => setActiveTab('setup')} icon={<Settings2 size={20} />} label="Campaign Setup" />
           <NavButton active={activeTab === 'simulation'} onClick={() => setActiveTab('simulation')} icon={<PlayCircle size={20} />} label="Run Simulation" />
           <NavButton active={activeTab === 'results'} onClick={() => setActiveTab('results')} icon={<BarChart3 size={20} />} label="Results & Analysis" />
+          <NavButton active={activeTab === 'reporting'} onClick={() => setActiveTab('reporting')} icon={<FileText size={20} />} label="Detailed Reporting" />
           <NavButton active={activeTab === 'import'} onClick={() => setActiveTab('import')} icon={<Upload size={20} />} label="Import Data" />
           <NavButton active={activeTab === 'optimize'} onClick={() => setActiveTab('optimize')} icon={<TrendingUp size={20} />} label="Optimize (A/B)" />
           <NavButton active={activeTab === 'learning'} onClick={() => setActiveTab('learning')} icon={<BookOpen size={20} />} label="Learning Center" />
@@ -958,8 +977,9 @@ export default function App() {
                             type="text" 
                             value={kw.text} 
                             onChange={(e) => {
-                              const newKws = [...currentSettings.keywords];
-                              newKws[i].text = e.target.value;
+                              const newKws = currentSettings.keywords.map((k, idx) => 
+                                idx === i ? { ...k, text: e.target.value } : k
+                              );
                               setCurrentSettings({...currentSettings, keywords: newKws});
                             }}
                             className={cn("flex-1 px-3 py-1 text-sm rounded outline-none focus:ring-2 focus:ring-blue-500 transition-colors", darkMode ? "bg-slate-900 border border-slate-700 text-white" : "bg-white border border-slate-200 text-slate-900")}
@@ -968,8 +988,9 @@ export default function App() {
                           <select 
                             value={kw.matchType}
                             onChange={(e) => {
-                              const newKws = [...currentSettings.keywords];
-                              newKws[i].matchType = e.target.value as any;
+                              const newKws = currentSettings.keywords.map((k, idx) => 
+                                idx === i ? { ...k, matchType: e.target.value as any } : k
+                              );
                               setCurrentSettings({...currentSettings, keywords: newKws});
                             }}
                             className={cn("text-xs rounded px-1 py-0.5 transition-colors", darkMode ? "bg-slate-900 border border-slate-700 text-white" : "bg-white border border-slate-200 text-slate-900")}
@@ -1396,6 +1417,193 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'reporting' && (
+            <motion.div key="reporting" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-8">
+              <div className="flex justify-between items-center">
+                <div>
+                  <h2 className={cn("text-2xl font-bold transition-colors", darkMode ? "text-white" : "text-slate-900")}>Detailed Campaign Reporting</h2>
+                  <p className={cn("text-sm transition-colors", darkMode ? "text-slate-400" : "text-slate-500")}>Comprehensive cross-campaign analysis and performance insights.</p>
+                </div>
+                {history.length > 0 && (
+                  <button 
+                    onClick={() => exportToExcel(history.map(h => ({ ...h.metrics, ...h.campaignSettings })), 'full_campaign_report')}
+                    className={cn("flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors text-sm font-medium", darkMode ? "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800" : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50")}
+                  >
+                    <Download size={16} /> Export Full Report
+                  </button>
+                )}
+              </div>
+
+              {history.length === 0 ? (
+                <div className={cn("p-12 rounded-3xl border-2 border-dashed text-center space-y-4 transition-colors", darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+                  <BarChart3 size={40} className="mx-auto text-slate-400" />
+                  <p className={cn("text-lg font-medium transition-colors", darkMode ? "text-slate-400" : "text-slate-500")}>No simulation history available. Run a simulation to see reports.</p>
+                  <button onClick={() => setActiveTab('setup')} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Start First Campaign</button>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {/* Comparison Overview */}
+                  <div className={cn("p-8 rounded-2xl border shadow-sm transition-colors", darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+                    <h3 className={cn("text-xl font-bold mb-6 flex items-center gap-2", darkMode ? "text-white" : "text-slate-900")}>
+                      <TrendingUp className="text-blue-600" /> Performance Comparison
+                    </h3>
+                    <div className="h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={[...history].reverse()}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode ? "#1e293b" : "#f1f5f9"} />
+                          <XAxis dataKey="campaignSettings.name" stroke={darkMode ? "#64748b" : "#94a3b8"} fontSize={12} />
+                          <YAxis stroke={darkMode ? "#64748b" : "#94a3b8"} fontSize={12} />
+                          <Tooltip 
+                            contentStyle={{ 
+                              borderRadius: '12px', 
+                              border: 'none', 
+                              boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)',
+                              backgroundColor: darkMode ? '#0f172a' : '#ffffff',
+                              color: darkMode ? '#f8fafc' : '#0f172a'
+                            }} 
+                          />
+                          <Legend />
+                          <Line type="monotone" dataKey="metrics.roas" name="ROAS" stroke="#3b82f6" strokeWidth={3} dot={{ r: 6 }} activeDot={{ r: 8 }} />
+                          <Line type="monotone" dataKey="metrics.ctr" name="CTR (%)" stroke="#a855f7" strokeWidth={3} dot={{ r: 6 }} activeDot={{ r: 8 }} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Detailed Table */}
+                  <div className={cn("p-8 rounded-2xl border shadow-sm transition-colors", darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}>
+                    <h3 className={cn("text-xl font-bold mb-6 flex items-center gap-2", darkMode ? "text-white" : "text-slate-900")}>
+                      <TableIcon className="text-blue-600" /> Campaign Inventory
+                    </h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className={cn("border-b transition-colors", darkMode ? "border-slate-800 text-slate-400" : "border-slate-100 text-slate-500")}>
+                            <th className="py-4 px-4 font-semibold">Campaign Name</th>
+                            <th className="py-4 px-4 font-semibold">Budget</th>
+                            <th className="py-4 px-4 font-semibold">Clicks</th>
+                            <th className="py-4 px-4 font-semibold">Conversions</th>
+                            <th className="py-4 px-4 font-semibold">ROAS</th>
+                            <th className="py-4 px-4 font-semibold">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {history.map((item) => (
+                            <tr key={item.id} className="group hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                              <td className={cn("py-4 px-4 font-medium transition-colors", darkMode ? "text-slate-300" : "text-slate-900")}>{item.campaignSettings.name}</td>
+                              <td className={cn("py-4 px-4 transition-colors", darkMode ? "text-slate-500" : "text-slate-600")}>${item.campaignSettings.budget}</td>
+                              <td className={cn("py-4 px-4 transition-colors", darkMode ? "text-slate-500" : "text-slate-600")}>{item.metrics.clicks}</td>
+                              <td className={cn("py-4 px-4 font-bold text-emerald-600")}>{item.metrics.conversions}</td>
+                              <td className={cn("py-4 px-4 font-bold text-blue-600")}>{item.metrics.roas.toFixed(2)}x</td>
+                              <td className="py-4 px-4">
+                                <button 
+                                  onClick={() => setSelectedReportId(item.id)}
+                                  className="text-blue-600 hover:text-blue-700 font-bold text-sm flex items-center gap-1"
+                                >
+                                  View Details <ChevronRight size={16} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Detailed Report Modal/Overlay */}
+                  {selectedReportId && (
+                    <motion.div 
+                      initial={{ opacity: 0 }} 
+                      animate={{ opacity: 1 }} 
+                      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-sm"
+                    >
+                      <motion.div 
+                        initial={{ scale: 0.95, opacity: 0 }} 
+                        animate={{ scale: 1, opacity: 1 }}
+                        className={cn("w-full max-w-4xl max-h-[90vh] overflow-y-auto p-8 rounded-3xl shadow-2xl border transition-colors", darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200")}
+                      >
+                        {(() => {
+                          const report = history.find(h => h.id === selectedReportId);
+                          if (!report) return null;
+                          return (
+                            <div className="space-y-8">
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <h3 className={cn("text-2xl font-bold transition-colors", darkMode ? "text-white" : "text-slate-900")}>{report.campaignSettings.name}</h3>
+                                  <p className="text-slate-500 text-sm">Detailed Report for {new Date(report.timestamp).toLocaleString()}</p>
+                                </div>
+                                <button 
+                                  onClick={() => setSelectedReportId(null)}
+                                  className={cn("p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors", darkMode ? "text-slate-400" : "text-slate-500")}
+                                >
+                                  <Trash2 size={20} />
+                                </button>
+                              </div>
+
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <div className={cn("p-4 rounded-2xl border transition-colors", darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-100")}>
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Impressions</p>
+                                  <p className={cn("text-xl font-bold transition-colors", darkMode ? "text-white" : "text-slate-900")}>{report.metrics.impressions.toLocaleString()}</p>
+                                </div>
+                                <div className={cn("p-4 rounded-2xl border transition-colors", darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-100")}>
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">CTR</p>
+                                  <p className="text-xl font-bold text-purple-600">{(report.metrics.ctr * 100).toFixed(2)}%</p>
+                                </div>
+                                <div className={cn("p-4 rounded-2xl border transition-colors", darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-100")}>
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">CPC</p>
+                                  <p className={cn("text-xl font-bold transition-colors", darkMode ? "text-white" : "text-slate-900")}>${report.metrics.cpc.toFixed(2)}</p>
+                                </div>
+                                <div className={cn("p-4 rounded-2xl border transition-colors", darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-100")}>
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">ROAS</p>
+                                  <p className="text-xl font-bold text-blue-600">{report.metrics.roas.toFixed(2)}x</p>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div className="space-y-4">
+                                  <h4 className={cn("font-bold flex items-center gap-2 transition-colors", darkMode ? "text-white" : "text-slate-900")}>
+                                    <Settings2 size={18} className="text-blue-600" /> Setup Configuration
+                                  </h4>
+                                  <div className={cn("p-6 rounded-2xl border space-y-3 text-sm transition-colors", darkMode ? "bg-slate-800 border-slate-700" : "bg-slate-50 border-slate-100")}>
+                                    <div className="flex justify-between"><span className="text-slate-500">Bid Strategy:</span> <span className="font-medium capitalize">{report.campaignSettings.bidStrategy.replace('_', ' ')}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Location:</span> <span className="font-medium">{report.campaignSettings.location}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Industry:</span> <span className="font-medium">{report.campaignSettings.industry}</span></div>
+                                    <div className="flex justify-between"><span className="text-slate-500">Keywords:</span> <span className="font-medium">{report.campaignSettings.keywords.length} active</span></div>
+                                  </div>
+                                </div>
+                                <div className="space-y-4">
+                                  <h4 className={cn("font-bold flex items-center gap-2 transition-colors", darkMode ? "text-white" : "text-slate-900")}>
+                                    <Zap size={18} className="text-amber-500" /> AI Performance Insight
+                                  </h4>
+                                  <div className={cn("p-6 rounded-2xl border transition-colors", darkMode ? "bg-blue-900/10 border-blue-900/20" : "bg-blue-50 border-blue-100")}>
+                                    <p className={cn("text-sm leading-relaxed transition-colors", darkMode ? "text-blue-300" : "text-blue-900")}>
+                                      {report.metrics.roas > 2 
+                                        ? `Excellent performance! The ${report.campaignSettings.bidStrategy} strategy combined with your keyword selection yielded a strong ${report.metrics.roas.toFixed(1)}x return. Consider scaling the budget by 20% to capture more volume.`
+                                        : `Performance is below target. The high CPC of $${report.metrics.cpc.toFixed(2)} is eating into your margins. We recommend refining your keyword match types to 'Exact' for better precision.`}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex justify-end pt-4">
+                                <button 
+                                  onClick={() => setSelectedReportId(null)}
+                                  className="px-8 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all"
+                                >
+                                  Close Report
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </motion.div>
+                    </motion.div>
+                  )}
+                </div>
+              )}
             </motion.div>
           )}
 
